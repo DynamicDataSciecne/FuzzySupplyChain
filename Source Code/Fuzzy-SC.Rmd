@@ -1,0 +1,280 @@
+---
+title: "Data-Driven Fuzzy Demand Forecasting Models for Resillient Supply Chains"
+author: "Erfanul Hoque"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r, include=FALSE, echo=FALSE}
+# required packages
+require(timeSeries)
+require(dplyr) # to get lag values
+library(TTR) # tp use "SMA" function
+library(zoo) # to use "rollapply" function
+library(fGarch) # for student t distribution
+library(tibble) # for data analysis purpose
+library(imputeTS) # for missing imputation
+library(tidyr) # for 'gather' function
+```
+
+
+```{r}
+# Call auxillary functions.
+source("aux_functions.R")
+```
+
+# Implementation using simulated and real data
+
+## Simulated data
+```{r}
+# generate data from AR(1) model
+set.seed(2021)
+#D.t <- AR_sim(t=500, mean = 60, ar.coef = 0.80, order = c(1, 0, 0), error = "norm", sd=8) # AR(1)
+D.t <- AR_sim(t=500, mean = 10, ar.coef = 0.80, order = c(1, 0, 0), error = "t", df=3.5) # AR(1)
+# Plot model
+par(mfrow = c(1, 3))
+order = c(1, 0, 0)
+plot.ts(D.t[1:100], ylab = paste("AR(", order[1], ")", sep = ""))
+acf(D.t, lag.max = 12, main = paste("AR(", order[1], ")", sep = ""))
+pacf(D.t, lag.max = 12, ylab = "PACF", main = paste("AR(", order[1], ")", sep = ""))
+dev.off()
+
+# Calculate l-step ahead fuzzy forecast
+#Fuzzy_forecast(data = D.t, l=length(D.t), alpha.cut = seq(0.025, 1, 0.025))
+alpha.cut <-  seq(0.025, 0.95, 0.025)
+#alpha.cut <-  seq(0.025, 1, 0.005)
+
+Ar1 <- Fuzzy_forecastARsim(data = D.t, L=5, alpha.cut = alpha.cut)
+DDwma <- Fuzzy_fore.DDWMA(data = D.t, L=5, alpha.cut = alpha.cut)
+z.star <- round(qnorm(1-alpha.cut/2, 0, 1),3)
+
+res1 <- data.frame(alpha.cut, z.star, Ar1[,-1], DDwma[,-1])
+res1 <- round(res1,3)
+res1
+#print(xtable::xtable(res1, digits=3),include.rownames=FALSE)
+
+# Plot
+#pdf("simfuzzyDDWMA.pdf", height=6, width=10)
+plot(res1[, 3], alpha.cut,type="l", xlab="Fuzzy forecasts", ylab=expression(alpha),
+     xlim=c(0, max(res1[, 4])),col="red")
+lines(res1[, 4], alpha.cut, type="l",col="red")
+
+lines(res1[, 5], alpha.cut, type="l", col="blue")
+lines(res1[, 6], alpha.cut, type="l", col="blue")
+legend("topright", lty=c(1, 1), 
+       col=c("red", "blue"),
+       legend=c("MMSE Forecast Interval","Fuzzy DDWMA Forecast Interval"),
+       bty="n", y.intersp=1.1, cex=0.7)
+
+# dev.off()
+
+# check the length of intervals
+mmse.int<- res1[,4]-res1[,3]
+ddwma.int<- res1[,6]-res1[,5]
+int.res<- data.frame(mmse.int, ddwma.int)
+colnames(int.res)<- c("MMSE forecast","DDWMA forecast")
+
+# Extended Bollinger bands
+
+sma_bb <- fuzzyBB_sma(data=D.t, L=5, dist="t", alpha.cut = alpha.cut)
+ddwma_bb <- fuzzyBB_DDWMA(data=D.t, L=5, dist="t", alpha.cut = alpha.cut)
+
+t.star <- qstd((1 - (alpha.cut/2)), mean = 0, sd = 1, nu=4.95)
+
+res2 <- data.frame(alpha.cut, t.star, sma_bb, ddwma_bb)
+res2 <- round(res2,3)
+res2
+#print(xtable::xtable(res2, digits=3),include.rownames=FALSE)
+
+
+# check the length of intervals
+std.intBB<- res2[,4]-res2[,3]
+ext.intBB<- res2[,6]-res2[,5]
+int.res2 <- data.frame(std.intBB, ext.intBB)
+colnames(int.res2)<- c("Standard BB","Extended BB")
+
+#pdf("simboxplotFuzzy.pdf", height=6, width=10)
+
+res <- list(int.res,int.res2)
+main.names<-c("Length of Fuzzy Forecasts", "Length of Fuzzy Bollinger Bands")
+par(mfrow=c(1, 2))
+for(j in 1:2){
+  boxplot(res[[j]], col=c(2, 3), main=main.names[j])
+}
+#dev.off()
+
+
+# Plot
+#pdf("simfuzzyBB.pdf", height=6, width=10)
+plot(res2[, 3], alpha.cut,type="l", xlab="Fuzzy forecasts", ylab=expression(alpha),
+     xlim=c(min(res2[, 3]), max(res2[, 4])),col="red")
+lines(res2[, 4], alpha.cut, type="l",col="red")
+
+lines(res2[, 5], alpha.cut, type="l", col="blue")
+lines(res2[, 6], alpha.cut, type="l", col="blue")
+legend("topright", lty=c(1, 1), 
+       col=c("red", "blue"),
+       legend=c("Fuzzy Standard BB Interval","Fuzzy Extended BB Interval"),
+       bty="n", y.intersp=1.1, cex=0.7)
+
+# dev.off()
+
+
+
+
+```
+
+
+
+## Real data
+```{r, warning=FALSE}
+######################################################################
+# Read data Implementation 
+# https://www.chicagobooth.edu/research/kilts/datasets/dominicks
+######################################################################
+# We use the publicly available Dominick’s Database published by the Kilts Center for Marketing, 
+# The University of Chicago Booth School for Business
+#library(tibble) 
+
+#Implementation for real data
+BathTissue_S112 <- read.csv("BathTissue_S112.csv")
+head(BathTissue_S112)
+
+#Exploring data for missing observations
+setdiff(1:max(BathTissue_S112$WEEK), BathTissue_S112$WEEK) # find which weeks are missing
+#262 263 264 265 284 285 314 315 316 317 352 353 354 355
+
+# Add missing rows in data
+data2 <- BathTissue_S112[,c(1,3,4)]
+
+# Add the new rows in specific places
+data2 <- data2 %>% add_row(STORE = 112, WEEK = 262:265, MOVE= 0, .before = 266)
+data2 <- data2 %>% add_row(STORE = 112, WEEK = 284:285, MOVE= 0, .before = 286)
+data2 <- data2 %>% add_row(STORE = 112, WEEK = 314:317, MOVE= 0, .before = 318)
+data2 <- data2 %>% add_row(STORE = 112, WEEK = 352:355, MOVE= 0, .before = 356)
+
+# Replace missing values as "NA"
+sum(data2==0)
+data2[data2==0] <- NA 
+
+# Quick code to replace missing values with the mean value
+#data2 <- sapply(data2,function(x) ifelse(is.na(x), mean(x, na.rm = TRUE),x))
+
+# Mean imputation
+ data2 <- na_mean(data2)
+# Last Observartion Carried Forward (LOCF)
+#data2 <- na_locf(data2)
+
+# Making data as time series data
+data.ts <- ts(data = data2[,3], start = 1, end = 399, frequency = 1,  deltat = 1/52)
+#data.ts <- ts(data = data2[,3], start = c(1989,1), frequency = 52, deltat = 1/52)
+plot.ts(data.ts, ylab = "unit", xlab = "week")
+
+data.ts <- data.ts[-which.max(data.ts)] # ignoring outliers
+#data.ts <- data.ts[-c(which(data.ts>170))] 
+length(data.ts) #398
+# Mean imputation
+#data.ts1 <- na_mean(data.ts)
+# Last Observartion Carried Forward (LOCF)
+# data.ts2 <- na_locf(data.ts)
+data.tsBT1 <- data.ts
+summary(data.tsBT1)
+#saveRDS(data.tsBT1, file="dataBT.rds")
+
+#pdf("tsplotBT.pdf", height=6, width=10)
+#data.ts <- ts(data = data2[,3], start = c(1989,1), frequency = 52, deltat = 1/52)
+plot.ts(data.tsBT1, ylab = "units", xlab = "week", col="green", main="Store 112: Toilet Paper (UPC 3828111217)")
+#dev.off()
+
+# Centered data
+#data.ts1 <- data.ts - mean(data.ts)
+
+D.t <- data.ts
+
+# Calculate l-step ahead fuzzy forecast
+#Fuzzy_forecast(data = D.t, l=length(D.t), alpha.cut = seq(0.025, 1, 0.025))
+alpha.cut <-  seq(0.025, 0.95, 0.025)
+
+#alpha.cut <-  seq(0.025, 1, 0.005)
+z.star <- round(qnorm(1-alpha.cut/2, 0, 1),3)
+
+Ar1 <- Fuzzy_forecastARdata(data = D.t, L=5, alpha.cut = alpha.cut)
+DDwma <- Fuzzy_fore.DDWMA(data = D.t, L=5, alpha.cut = alpha.cut)
+
+res1 <- data.frame(alpha.cut, z.star, Ar1[,-1], DDwma[,-1])
+res1 <- data.frame(alpha.cut, z.star, Ar1[,-1]+50, DDwma[,-1]+50) # location shift
+res1 <- round(res1,3)
+res1
+#print(xtable::xtable(res1, digits=3),include.rownames=FALSE)
+
+# Plot
+#pdf("fuzzyDDWMA.pdf", height=6, width=10)
+plot(res1[, 3], alpha.cut,type="l", xlab="Fuzzy forecasts", ylab=expression(alpha),
+     xlim=c(min(res1[, 3]), max(res1[, 4])),col="red")
+lines(res1[, 4], alpha.cut, type="l",col="red")
+
+lines(res1[, 5], alpha.cut, type="l", col="blue")
+lines(res1[, 6], alpha.cut, type="l", col="blue")
+legend("topright", lty=c(1, 1), 
+       col=c("red", "blue"),
+       legend=c("MMSE Forecast Interval","Fuzzy DDWMA Forecast Interval"),
+       bty="n", y.intersp=1.1, cex=0.7)
+
+ #dev.off()
+
+# check the length of intervals
+mmse.int<- res1[,4]-res1[,3]
+ddwma.int<- res1[,6]-res1[,5]
+int.res<- data.frame(mmse.int, ddwma.int)
+colnames(int.res)<- c("MMSE forecast","DDWMA forecast")
+
+
+# Extended Bollinger bands
+sma_bb <- fuzzyBB_sma(data=D.t, L=5, dist="t", alpha.cut = alpha.cut)
+ddwma_bb <- fuzzyBB_DDWMA(data=D.t, L=5, dist="t", alpha.cut = alpha.cut)
+
+t.star <- qstd((1 - (alpha.cut/2)), mean = 0, sd = 1, nu=4.95)
+
+res2 <- data.frame(alpha.cut, t.star, sma_bb, ddwma_bb)
+res2 <- data.frame(alpha.cut, t.star, sma_bb+50, ddwma_bb+50) # location shift
+res2 <- round(res2,3)
+res2
+#print(xtable::xtable(res2, digits=3),include.rownames=FALSE)
+
+# check the length of intervals
+std.intBB<- res2[,4]-res2[,3]
+ext.intBB<- res2[,6]-res2[,5]
+int.res2 <- data.frame(std.intBB, ext.intBB)
+colnames(int.res2)<- c("Standard BB","Extended BB")
+
+#pdf("boxplotFuzzy.pdf", height=6, width=10)
+
+res <- list(int.res,int.res2)
+main.names<-c("Length of Fuzzy Forecasts", "Length of Fuzzy Bollinger Bands")
+par(mfrow=c(1, 2))
+for(j in 1:2){
+  boxplot(res[[j]], col=c(2, 3), main=main.names[j])
+}
+#dev.off()
+
+
+# Plot
+#pdf("fuzzyBB.pdf", height=6, width=10)
+plot(res2[, 3], alpha.cut,type="l", xlab="Fuzzy forecasts", ylab=expression(alpha),
+     xlim=c(min(res1[, 3]), max(res1[, 4])),col="red")
+lines(res2[, 4], alpha.cut, type="l",col="red")
+
+lines(res2[, 5], alpha.cut, type="l", col="blue")
+lines(res2[, 6], alpha.cut, type="l", col="blue")
+legend("topright", lty=c(1, 1), 
+       col=c("red", "blue"),
+       legend=c("Fuzzy Standard BB Interval","Fuzzy Extended BB Interval"),
+       bty="n", y.intersp=1.1, cex=0.7)
+
+ #dev.off()
+
+```
+
+
+
